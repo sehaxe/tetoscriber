@@ -1,0 +1,28 @@
+[package]
+name = "teto-controller"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+qdrant-client.workspace = true
+redis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+teto-protocol.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+testcontainers = "0.27.2"
+
+[features]
+default = []
+dev = []
