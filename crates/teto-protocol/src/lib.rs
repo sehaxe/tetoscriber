@@ -13,6 +13,8 @@ pub struct TranscriptionSegment {
     pub text: String,
     pub start_ms: u64,
     pub end_ms: u64,
+    #[serde(default)]
+    pub is_final: bool,
     pub voice_fingerprint: Option<VoiceFingerprint>,
     pub identified_name: Option<String>,
 }
@@ -31,9 +33,15 @@ impl TranscriptionSegment {
             text: text.into(),
             start_ms,
             end_ms,
+            is_final: false,
             voice_fingerprint: None,
             identified_name: None,
         }
+    }
+
+    pub fn with_finality(mut self, is_final: bool) -> Self {
+        self.is_final = is_final;
+        self
     }
 
     pub fn with_voice_fingerprint(mut self, fingerprint: VoiceFingerprint) -> Self {
@@ -289,10 +297,19 @@ mod tests {
     #[test]
     fn transcription_segment_round_trips_through_json() {
         let segment = TranscriptionSegment::new("session", "Speaker_1", "Hello Nick.", 0, 2500)
+            .with_finality(true)
             .with_identified_name("Nick");
         let json = serde_json::to_string(&segment).unwrap();
         let decoded: TranscriptionSegment = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, segment);
+    }
+
+    #[test]
+    fn transcription_segment_defaults_to_non_final_for_backward_compatibility() {
+        let json = r#"{"session_id":"session","speaker_tag":"Speaker_1","text":"Hello","start_ms":0,"end_ms":100}"#;
+        let decoded: TranscriptionSegment = serde_json::from_str(json).unwrap();
+
+        assert!(!decoded.is_final);
     }
 }

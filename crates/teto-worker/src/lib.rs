@@ -1,4 +1,7 @@
 #[cfg(feature = "riva")]
+mod audio;
+
+#[cfg(feature = "riva")]
 pub mod riva {
     pub mod asr {
         tonic::include_proto!("nvidia.riva.asr");

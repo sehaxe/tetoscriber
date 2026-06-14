@@ -99,11 +99,15 @@ async fn init_memory() -> Option<SovereignMemory> {
             match tokio::time::timeout(Duration::from_secs(10), memory.ensure_collections()).await {
                 Ok(Ok(())) => info!("Qdrant memory collections are ready"),
                 Ok(Err(error)) => {
-                    warn!(%error, "Qdrant collection bootstrap failed; controller will keep running without memory")
+                    warn!(%error, "Qdrant collection bootstrap failed; controller will keep running without memory");
+                    return None;
                 }
-                Err(_) => warn!(
-                    "Qdrant collection bootstrap timed out; controller will keep running without memory"
-                ),
+                Err(_) => {
+                    warn!(
+                        "Qdrant collection bootstrap timed out; controller will keep running without memory"
+                    );
+                    return None;
+                }
             }
 
             Some(memory)

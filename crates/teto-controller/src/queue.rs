@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamId, StreamReadOptions, StreamReadReply};
-use redis::{AsyncCommands, Client, ErrorKind, ServerErrorKind};
+use redis::{AsyncCommands, Client};
 use teto_protocol::{
     BrainIdentityRequest, BrainIdentityResponse, IdentityResolved, IdentitySource,
     TranscriptionSegment, VoiceFingerprint, VoiceIdentityUpsert,
@@ -306,16 +306,17 @@ impl StreamListener {
     }
 
     async fn ensure_stream_group(&self, connection: &mut ConnectionManager) -> Result<()> {
-        let result: redis::RedisResult<()> = connection
-            .xgroup_create_mkstream(
-                self.config.transcription_stream.as_str(),
-                self.config.controller_group.as_str(),
-                "0",
-            )
+        let result: redis::RedisResult<redis::Value> = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(self.config.transcription_stream.as_str())
+            .arg(self.config.controller_group.as_str())
+            .arg("0")
+            .arg("MKSTREAM")
+            .query_async(connection)
             .await;
 
         match result {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(error) if is_busy_group(&error) => Ok(()),
             Err(error) => Err(error).context("failed to create Redis stream consumer group"),
         }
@@ -403,20 +404,18 @@ impl BrainResolutionListener {
         let mut connection = self.connect().await?;
 
         loop {
-            let payload: Option<String> = connection
-                .brpop(&[self.config.brain_resolutions_queue.as_str()], 0.0)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to read brain resolutions from '{}'",
-                        self.config.brain_resolutions_queue
-                    )
-                })?;
+            let Some(payload) = Self::brpop_payload(
+                &mut connection,
+                &self.config.brain_resolutions_queue,
+                "brain resolutions queue",
+            )
+            .await?
+            else {
+                continue;
+            };
 
-            if let Some(payload) = payload {
-                self.handle_resolution_payload(&mut connection, &payload)
-                    .await?;
-            }
+            self.handle_resolution_payload(&mut connection, &payload)
+                .await?;
         }
     }
 
@@ -575,6 +574,21 @@ impl BrainResolutionListener {
         );
 
         Ok(())
+    }
+
+    async fn brpop_payload(
+        connection: &mut ConnectionManager,
+        queue: &str,
+        queue_label: &str,
+    ) -> Result<Option<String>> {
+        let response: Option<Vec<String>> = redis::cmd("BRPOP")
+            .arg(queue)
+            .arg(0)
+            .query_async(connection)
+            .await
+            .with_context(|| format!("failed to read {queue_label} '{queue}'"))?;
+
+        Ok(response.and_then(|values| values.into_iter().nth(1)))
     }
 
     async fn connect(&self) -> Result<ConnectionManager> {
@@ -785,10 +799,7 @@ fn redis_value_to_json(value: &redis::Value) -> serde_json::Value {
 }
 
 fn is_busy_group(error: &redis::RedisError) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::Server(ServerErrorKind::ResponseError)
-    ) && error.to_string().contains("BUSYGROUP")
+    error.to_string().contains("BUSYGROUP")
 }
 
 fn env_or_default(key: &str, default: &str) -> String {

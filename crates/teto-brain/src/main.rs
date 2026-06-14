@@ -1,10 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
 use teto_protocol::{BrainIdentityRequest, BrainIdentityResponse};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command as TokioCommand;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -13,6 +19,7 @@ const DEFAULT_BRAIN_QUEUE: &str = "teto_brain_queue";
 const DEFAULT_BRAIN_RESOLUTIONS_QUEUE: &str = "brain_resolutions";
 const DEFAULT_KNOWN_NAMES_JSON: &str = "";
 const DEFAULT_RECONNECT_DELAY_SECS: u64 = 2;
+const DEFAULT_BRAIN_BACKEND: &str = "regex";
 
 #[derive(Debug, Clone)]
 pub struct BrainConfig {
@@ -45,15 +52,15 @@ impl Default for BrainConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TetoBrain {
     config: BrainConfig,
-    engine: RegexIdentityEngine,
+    backend: Arc<dyn BrainBackend>,
 }
 
 impl TetoBrain {
-    pub fn new(config: BrainConfig, engine: RegexIdentityEngine) -> Self {
-        Self { config, engine }
+    pub fn new(config: BrainConfig, backend: Arc<dyn BrainBackend>) -> Self {
+        Self { config, backend }
     }
 
     pub async fn run(self) {
@@ -72,21 +79,17 @@ impl TetoBrain {
         let mut connection = self.connect().await?;
 
         loop {
-            let payload: Option<String> = connection
-                .brpop(&[self.config.brain_queue.as_str()], 0.0)
-                .await
-                .with_context(|| {
-                    format!("failed to read brain queue '{}'", self.config.brain_queue)
-                })?;
-
-            let Some(payload) = payload else {
+            let Some(payload) =
+                Self::brpop_payload(&mut connection, &self.config.brain_queue, "brain queue")
+                    .await?
+            else {
                 continue;
             };
 
             let request: BrainIdentityRequest = serde_json::from_str(&payload)
                 .with_context(|| format!("failed to decode brain identity request: {payload}"))?;
 
-            let response = self.engine.infer(&request)?;
+            let response = self.backend.infer(&request).await?;
             let response_payload = serde_json::to_string(&response)
                 .context("failed to encode brain identity response")?;
 
@@ -108,6 +111,21 @@ impl TetoBrain {
         }
     }
 
+    async fn brpop_payload(
+        connection: &mut ConnectionManager,
+        queue: &str,
+        queue_label: &str,
+    ) -> Result<Option<String>> {
+        let response: Option<Vec<String>> = redis::cmd("BRPOP")
+            .arg(queue)
+            .arg(0)
+            .query_async(connection)
+            .await
+            .with_context(|| format!("failed to read {queue_label} '{queue}'"))?;
+
+        Ok(response.and_then(|values| values.into_iter().nth(1)))
+    }
+
     async fn connect(&self) -> Result<ConnectionManager> {
         let client = Client::open(self.config.redis_url.as_str())
             .with_context(|| format!("invalid Redis URL '{}'", self.config.redis_url))?;
@@ -116,6 +134,75 @@ impl TetoBrain {
             .await
             .context("Redis connection manager creation timed out")?
             .context("failed to create Redis connection manager")
+    }
+}
+
+#[async_trait]
+pub trait BrainBackend: Send + Sync {
+    async fn infer(&self, request: &BrainIdentityRequest) -> Result<BrainIdentityResponse>;
+}
+
+#[derive(Debug)]
+struct RegexBrainBackend {
+    engine: RegexIdentityEngine,
+}
+
+#[async_trait]
+impl BrainBackend for RegexBrainBackend {
+    async fn infer(&self, request: &BrainIdentityRequest) -> Result<BrainIdentityResponse> {
+        self.engine.infer(request)
+    }
+}
+
+#[derive(Debug)]
+struct CommandBrainBackend {
+    command: Vec<OsString>,
+}
+
+#[async_trait]
+impl BrainBackend for CommandBrainBackend {
+    async fn infer(&self, request: &BrainIdentityRequest) -> Result<BrainIdentityResponse> {
+        let Some((program, args)) = self.command.split_first() else {
+            bail!("TETO_BRAIN_COMMAND must contain at least one executable");
+        };
+
+        let mut child = TokioCommand::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "failed to spawn brain command '{}'",
+                    program.to_string_lossy()
+                )
+            })?;
+
+        let request_payload =
+            serde_json::to_vec(request).context("failed to encode brain request")?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&request_payload)
+                .await
+                .context("failed to write brain request to command stdin")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .context("failed to read brain command output")?;
+
+        if !output.status.success() {
+            bail!(
+                "brain command exited with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        serde_json::from_slice(&output.stdout)
+            .context("failed to decode brain command stdout as BrainIdentityResponse")
     }
 }
 
@@ -330,10 +417,37 @@ async fn main() -> Result<()> {
         "Teto-Brain configuration loaded"
     );
 
-    let engine = RegexIdentityEngine::from_env().context("failed to initialize identity engine")?;
+    let backend = brain_backend_from_env().context("failed to initialize identity backend")?;
 
-    TetoBrain::new(config, engine).run().await;
+    TetoBrain::new(config, backend).run().await;
     Ok(())
+}
+
+fn brain_backend_from_env() -> Result<Arc<dyn BrainBackend>> {
+    let backend = env_or_default("TETO_BRAIN_BACKEND", DEFAULT_BRAIN_BACKEND).to_ascii_lowercase();
+
+    match backend.as_str() {
+        "regex" => {
+            let engine = RegexIdentityEngine::from_env()
+                .context("failed to initialize regex identity engine")?;
+            Ok(Arc::new(RegexBrainBackend { engine }))
+        }
+        "command" => {
+            let raw = std::env::var("TETO_BRAIN_COMMAND")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .context("TETO_BRAIN_COMMAND is required when TETO_BRAIN_BACKEND=command")?;
+
+            let command = raw
+                .split_whitespace()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+
+            Ok(Arc::new(CommandBrainBackend { command }))
+        }
+        other => bail!("unsupported TETO_BRAIN_BACKEND '{other}'; expected 'regex' or 'command'"),
+    }
 }
 
 fn init_tracing() {

@@ -1,17 +1,17 @@
 [package]
-name = "teto-brain"
+name = "teto-cli"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "tetoscribe"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
+clap = { version = "4.5", features = ["derive"] }
 redis.workspace = true
-serde_json.workspace = true
-teto-protocol.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true

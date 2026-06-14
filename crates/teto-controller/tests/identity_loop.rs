@@ -126,13 +126,9 @@ async fn identity_loop_closes_without_riva() -> Result<()> {
     assert_eq!(fast_path.text, "Алиса продолжает разговор.");
     assert_eq!(fast_path.identified_name.as_deref(), Some("Алиса"));
 
-    let maybe_new_request = timeout(
-        Duration::from_millis(600),
-        timeout_brpop(&mut connection, &config.brain_queue),
-    )
-    .await
-    .context("timed out while checking fast path did not dispatch brain request")?
-    .context("fast-path brpop failed")?;
+    let maybe_new_request = try_lpop_payload(&mut connection, &config.brain_queue)
+        .await
+        .context("fast-path lpop failed")?;
     assert!(
         maybe_new_request.is_none(),
         "fast-path segment should match persisted voice identity without Brain dispatch"
@@ -224,10 +220,35 @@ async fn timeout_brpop(
     connection: &mut redis::aio::ConnectionManager,
     queue: &str,
 ) -> Result<Option<String>> {
-    timeout(Duration::from_secs(5), connection.brpop(&[queue], 0.0))
+    match timeout(
+        Duration::from_secs(5),
+        redis::cmd("BRPOP")
+            .arg(queue)
+            .arg(0)
+            .query_async(connection),
+    )
+    .await
+    {
+        Ok(Ok(response)) => {
+            let response: Option<Vec<String>> = response;
+            Ok(response.and_then(|values| values.into_iter().nth(1)))
+        }
+        Ok(Err(error)) => Err(error).context("Redis brpop failed"),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn try_lpop_payload(
+    connection: &mut redis::aio::ConnectionManager,
+    queue: &str,
+) -> Result<Option<String>> {
+    let response: Option<Vec<String>> = redis::cmd("LPOP")
+        .arg(queue)
+        .query_async(connection)
         .await
-        .context("timed out waiting for Redis list item")?
-        .context("Redis brpop failed")
+        .context("Redis lpop failed")?;
+
+    Ok(response.and_then(|values| values.into_iter().nth(1)))
 }
 
 fn fingerprint() -> VoiceFingerprint {

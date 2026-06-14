@@ -5,17 +5,18 @@
 **Branch:** main
 
 ## OVERVIEW
-TetoScribe is a seed repository for a sovereign local speech pipeline: Rust/Axum/Tonic controller, NVIDIA Riva ASR/diarization, TensorRT-LLM/llama-cpp reasoning, Redis tasking, and Qdrant voice/transcript memory. Current implementation is a Rust workspace scaffold with `teto-brain`, `teto-controller`, `teto-protocol`, and `teto-worker`; the controller now includes a Redis queue layer and Axum WebSocket live endpoint, `teto-worker` includes a feature-gated Riva ASR streaming client and dispatcher, and `teto-brain` includes a Redis-backed mock/regex identity loop ready for heavier local LLM inference later.
+TetoScribe is a seed repository for a sovereign local speech pipeline: Rust/Axum/Tonic controller, NVIDIA Riva ASR/diarization, local Brain identity backends, Redis tasking, and Qdrant voice/transcript memory. Current implementation is a Rust workspace with `teto-brain`, `teto-cli`, `teto-controller`, `teto-protocol`, and `teto-worker`; the controller includes a Redis queue layer and Axum WebSocket live endpoint, `teto-worker` includes a feature-gated Riva ASR streaming client, PCM WAV/raw-PCM decoding, and local acoustic fingerprint bridging, and `teto-brain` includes a Redis-backed regex identity loop plus a local command backend boundary for heavier local LLM inference later.
 
 ## STRUCTURE
 ```text
 .
-├── README.md      # placeholder project name only
+├── README.md      # user-facing setup, env vars, and workflow docs
 ├── LICENSE        # license terms
 ├── AGENTS.md      # generated project knowledge base
 ├── Cargo.toml     # Rust workspace manifest
 └── crates/
     ├── teto-brain/       # Redis-backed identity reasoning binary
+    ├── teto-cli/         # `tetoscribe process <path>` archive enqueue CLI
     ├── teto-controller/  # pure Rust API/Redis/Qdrant coordinator
     ├── teto-protocol/    # shared serde schemas for Redis/Qdrant/Brain messages
     └── teto-worker/      # Rust worker scaffold with optional Riva gRPC generation
@@ -26,25 +27,28 @@ TetoScribe is a seed repository for a sovereign local speech pipeline: Rust/Axum
 |------|----------|-------|
 | Project intent and target stack | This file | User brief defines Riva + Rust + TensorRT-LLM + Qdrant |
 | Workspace dependencies | `Cargo.toml` | Centralized Rust workspace dependencies and crate members |
-| Teto-Brain / Identity Loop | `crates/teto-brain/src/main.rs` | Redis brain queue consumer, mock/regex speaker-name inference, and Redis resolution response producer |
+| Teto-Brain / Identity Loop | `crates/teto-brain/src/main.rs` | Redis brain queue consumer, regex and command speaker-name backends, and Redis resolution response producer |
 | Shared protocol schemas | `crates/teto-protocol/` | Serde JSON types for transcription segments, Redis tasks, Qdrant memory upserts, and Brain identity responses |
 | Controller scaffold | `crates/teto-controller/` | Pure Rust binary; Redis tasking, Axum WebSocket live endpoint, Qdrant memory here |
 | Worker scaffold | `crates/teto-worker/` | Tonic worker; optional Riva client generated from `RIVA_PROTO_DIR` |
 | Riva worker client | `crates/teto-worker/src/riva_client.rs` | Feature-gated Riva ASR streaming client, diarization request config, and protocol-to-segment mapping |
-| Worker dispatcher | `crates/teto-worker/src/job_processor.rs` | Redis archive job consumer, live Pub/Sub audio consumer, file streaming through `tokio-util::io::ReaderStream`, and Redis Stream publishing |
+| Worker dispatcher | `crates/teto-worker/src/job_processor.rs` | Redis archive job consumer, live Pub/Sub audio consumer, PCM WAV/raw-PCM decoding, local acoustic fingerprint bridging, and Redis Stream publishing |
 | Riva protobuf build hook | `crates/teto-worker/build.rs` | Compiles Riva ASR/audio/common protos only when `RIVA_PROTO_DIR` or `RIVA_PROTO_FILES` is set |
 | Redis queue and HTTP/WebSocket API | `crates/teto-controller/src/queue.rs` and `main.rs` | Stream listener, brain request dispatch, live Pub/Sub/WebSocket broadcast |
 | Memory/indexing | `crates/teto-controller/src/storage.rs` | Qdrant client and voice/transcript vectors |
-| Future LLM reasoning | Future crate/module | Local TensorRT-LLM/llama.cpp integration boundary |
+| Future LLM reasoning | `crates/teto-brain/src/main.rs` command backend | Local command wrapper boundary for TensorRT-LLM/llama.cpp or other local inference helpers |
 
 ## CODE MAP
 | Symbol | Type | Location | Role |
 |--------|------|----------|------|
 | `main` | Rust entry point | `crates/teto-brain/src/main.rs` | Initializes tracing, loads Redis brain queue config, consumes identity requests, and produces identity responses |
 | `BrainConfig` | Rust struct | `crates/teto-brain/src/main.rs` | Environment-driven Redis brain queue, resolution queue, and reconnect delay settings |
-| `TetoBrain` | Rust struct | `crates/teto-brain/src/main.rs` | Redis brain listener and response producer |
+| `TetoBrain` | Rust struct | `crates/teto-brain/src/main.rs` | Redis brain listener and response producer backed by a pluggable `BrainBackend` |
+| `BrainBackend` | Rust trait | `crates/teto-brain/src/main.rs` | Async identity backend boundary for regex and local command implementations |
+| `CommandBrainBackend` | Rust struct | `crates/teto-brain/src/main.rs` | Local command backend that accepts `BrainIdentityRequest` JSON on stdin and emits `BrainIdentityResponse` JSON on stdout |
 | `RegexIdentityEngine` | Rust struct | `crates/teto-brain/src/main.rs` | Configurable regex identity engine for bootstrapping the Redis message loop before heavier local LLM inference |
 | `KnownNames` | Rust struct | `crates/teto-brain/src/main.rs` | Environment-loaded JSON map of canonical names to aliases; no speaker names are hardcoded |
+| `main` | Rust entry point | `crates/teto-cli/src/main.rs` | Parses `tetoscribe process <path>` and enqueues an archive job to Redis |
 | `main` | Rust entry point | `crates/teto-controller/src/main.rs` | Initializes tracing, Redis/Qdrant config, stream and brain listeners, and `/ws/live` Axum endpoint |
 | `StorageConfig` | Rust struct | `crates/teto-controller/src/storage.rs` | Environment-driven Qdrant memory configuration with safe defaults |
 | `SovereignMemory` | Rust struct | `crates/teto-controller/src/storage.rs` | Qdrant-backed memory client for collection bootstrapping, voice matching, voice upsert, and transcript indexing |
@@ -64,9 +68,11 @@ TetoScribe is a seed repository for a sovereign local speech pipeline: Rust/Axum
 | `main` | Rust entry point | `crates/teto-worker/src/main.rs` | Initializes tracing and prints worker scaffold status |
 | `worker_ready` | Rust function | `crates/teto-worker/src/lib.rs` | Library status helper used by tests and binary |
 | `RivaClientConfig` | Rust struct | `crates/teto-worker/src/riva_client.rs` | Environment-driven Riva ASR endpoint, audio, chunking, diarization, and model settings |
-| `RivaClient` | Rust struct | `crates/teto-worker/src/riva_client.rs` | Feature-gated Riva ASR streaming client that maps Riva results to `teto_protocol::TranscriptionSegment` |
+| `RivaClient` | Rust struct | `crates/teto-worker/src/riva_client.rs` | Feature-gated Riva ASR streaming client that maps final Riva results to `teto_protocol::TranscriptionSegment` |
+| `AudioInfo` | Rust struct | `crates/teto-worker/src/audio.rs` | PCM metadata used for WAV decoding and audio-slice fingerprinting |
+| `decode_audio_bytes` | Rust function | `crates/teto-worker/src/audio.rs` | Decodes simple PCM WAV files or treats non-WAV bytes as raw PCM |
 | `WorkerConfig` | Rust struct | `crates/teto-worker/src/job_processor.rs` | Environment-driven Redis queues, live channel, transcription stream, file chunk size, and reconnect delay |
-| `JobProcessor` | Rust struct | `crates/teto-worker/src/job_processor.rs` | Redis archive/live dispatcher that reads audio, streams it through Riva, bridges placeholder fingerprints, and publishes segments |
+| `JobProcessor` | Rust struct | `crates/teto-worker/src/job_processor.rs` | Redis archive/live dispatcher that reads audio, streams it through Riva, bridges local acoustic fingerprints, and publishes segments |
 
 ## CONVENTIONS
 - Rust-first controller: async `tokio`, `tonic` gRPC, `axum` HTTP/WebSocket.
@@ -98,6 +104,8 @@ TetoScribe is a seed repository for a sovereign local speech pipeline: Rust/Axum
 ```bash
 cargo check
 cargo test
+cargo run -p teto-cli -- --help
+cargo run -p teto-cli -- process ./mike_and_nick.wav
 cargo run -p teto-controller
 cargo run -p teto-worker
 cargo run -p teto-worker --features riva
@@ -108,12 +116,13 @@ cargo run -p teto-worker --features riva
 - Identity Loop implementation starts in `teto-protocol`, then uses controller Redis/Qdrant state handling.
 - Qdrant collections for Identity Loop are `teto_voices` (192-dim cosine) and `teto_transcripts` / `teto_history` (text embeddings).
 - `crates/teto-controller/src/storage.rs` contains `StorageConfig`, `SovereignMemory`, and `MatchedVoice`; it bootstraps Qdrant collections and uses the modern `query` API for voice matching, not legacy `search_points`.
-- `crates/teto-brain/src/main.rs` contains the Redis brain queue consumer, response producer, and configurable regex identity engine. Known names are loaded from `TETO_KNOWN_NAMES_JSON`, a JSON object mapping canonical display names to aliases; no speaker names are hardcoded.
-- `crates/teto-controller/src/queue.rs` owns `QueueConfig`, `StreamListener`, `BrainResolutionListener`, `LiveState`, and `/ws/live`. It uses Redis Streams with a consumer group, Redis list dispatch for brain requests, Redis Pub/Sub for live transcripts, Axum WebSocket broadcast for clients, replay of buffered segments after identity resolution, and `IdentityResolved` WebSocket events.
+- `crates/teto-brain/src/main.rs` contains the Redis brain queue consumer, response producer, configurable regex identity engine, and optional local command backend. Known names are loaded from `TETO_KNOWN_NAMES_JSON`, a JSON object mapping canonical display names to aliases; no speaker names are hardcoded.
+- `crates/teto-controller/src/queue.rs` owns `QueueConfig`, `StreamListener`, `BrainResolutionListener`, `LiveState`, and `/ws/live`. It uses Redis Streams with a consumer group, Redis list dispatch for brain requests, Redis Pub/Sub for live transcripts, Axum WebSocket broadcast for clients, replay of buffered segments after identity resolution, and `IdentityResolved` WebSocket events. Redis `BRPOP` responses are decoded as `[queue, payload]` arrays.
 - `crates/teto-controller/tests/identity_loop.rs` simulates the Identity Loop without Riva using a Redis testcontainer, a mock `IdentityStorage`, synthetic voice fingerprints, a Brain response, replayed transcript segments, and fast-path voice matching.
 - Controller startup attempts Qdrant bootstrap inside timeouts and logs failures instead of crashing, matching the "controller never falls" requirement. Redis listener startup reconnects instead of crashing when Redis is unavailable.
 - `teto-worker --features riva` requires `RIVA_PROTO_DIR` or `RIVA_PROTO_FILES` pointing at NVIDIA Riva proto files, e.g. `nvidia-riva/common/riva/proto`.
-- `teto-worker/src/riva_client.rs` implements streaming ASR with diarization enabled and maps final/interim Riva results into `TranscriptionSegment`; Riva Speaker Recognition voice embeddings are not wired yet because the public `nvidia-riva/common` proto set does not include a speaker-recognition service.
-- `teto-worker/src/job_processor.rs` owns `WorkerConfig` and `JobProcessor`. It consumes archive paths from `teto_archive_jobs` via `BRPOP`, streams files with `ReaderStream`, consumes live audio from `teto_audio_live` Pub/Sub, publishes `TranscriptionSegment` JSON into `teto_transcription_stream`, and uses deterministic 192-dim placeholder fingerprints per session/speaker until real biometrics are available.
+- `teto-worker/src/riva_client.rs` implements streaming ASR with diarization enabled, requests interim results when configured, but filters non-final results before producing `TranscriptionSegment`; Riva Speaker Recognition voice embeddings are not wired yet because the public `nvidia-riva/common` proto set does not include a speaker-recognition service.
+- `teto-worker/src/job_processor.rs` owns `WorkerConfig` and `JobProcessor`. It consumes archive paths from `teto_archive_jobs` via `BRPOP`, decodes simple PCM WAV files or raw PCM, streams files/live audio through Riva, bridges 192-dim local acoustic fingerprints from audio slices with deterministic speaker-tag fallback, and publishes final `TranscriptionSegment` JSON into `teto_transcription_stream`.
+- `crates/teto-cli/src/main.rs` implements `tetoscribe process <path>`, which validates the path and enqueues it into `TETO_ARCHIVE_JOBS` for the worker.
 - Riva model precision/quantization is configured server-side by the deployed Riva pipeline/model; the worker client can select `RIVA_ASR_MODEL` and `RIVA_CUSTOM_CONFIGURATION` but should not hard-code VRAM assumptions.
 - Child knowledge bases should be added only after meaningful directories such as `src/`, `proto/`, `crates/`, or `examples/` exist.

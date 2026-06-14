@@ -286,6 +286,10 @@ fn result_to_segment(
     session_id: &str,
     result: StreamingRecognitionResult,
 ) -> Option<TranscriptionSegment> {
+    if !result.is_final {
+        return None;
+    }
+
     let alternative = result.alternatives.into_iter().max_by(|left, right| {
         left.confidence
             .partial_cmp(&right.confidence)
@@ -300,13 +304,10 @@ fn result_to_segment(
     let speaker_tag = speaker_tag_from_words(&alternative.words);
     let (start_ms, end_ms) = time_range_from_words(&alternative.words, result.audio_processed);
 
-    Some(TranscriptionSegment::new(
-        session_id,
-        speaker_tag,
-        transcript,
-        start_ms,
-        end_ms,
-    ))
+    Some(
+        TranscriptionSegment::new(session_id, speaker_tag, transcript, start_ms, end_ms)
+            .with_finality(true),
+    )
 }
 
 fn speaker_tag_from_words(words: &[WordInfo]) -> String {
