@@ -9,7 +9,7 @@ use tokio_stream::StreamExt;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::audio::{decode_audio_bytes, read_audio_file, AudioInfo};
+use crate::audio::{read_audio_file, AudioInfo};
 use crate::riva_client::{RivaClient, RivaClientConfig};
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
@@ -86,7 +86,7 @@ impl JobProcessor {
                 Ok(()) => {}
                 Err(error) => {
                     warn!(%error, "archive job consumer failed; reconnecting");
-                    sleep(self.config.reconnect_delay).await;
+                    tokio::time::sleep(self.config.reconnect_delay).await;
                 }
             }
         }
@@ -98,7 +98,7 @@ impl JobProcessor {
                 Ok(()) => {}
                 Err(error) => {
                     warn!(%error, "live audio consumer failed; reconnecting");
-                    sleep(self.config.reconnect_delay).await;
+                    tokio::time::sleep(self.config.reconnect_delay).await;
                 }
             }
         }
@@ -303,7 +303,7 @@ async fn brpop_payload(
         .await
         .with_context(|| format!("failed to read {queue_label} '{queue}'"))?;
 
-    Ok(response.and_then(|mut values| values.into_iter().nth(1)))
+    Ok(response.and_then(|values| values.into_iter().nth(1)))
 }
 
 #[derive(Debug, Clone)]
@@ -378,7 +378,7 @@ fn bridge_audio_fingerprints(segments: &mut [TranscriptionSegment], audio: &[u8]
         if let Some(slice) =
             audio_slice_for_time_range(audio, segment.start_ms, segment.end_ms, info)
         {
-            segment.voice_fingerprint = Some(acoustic_fingerprint(slice));
+            segment.voice_fingerprint = Some(acoustic_fingerprint(&slice));
         } else {
             ensure_speaker_fallback_fingerprint(segment);
         }
